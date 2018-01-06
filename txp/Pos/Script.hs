@@ -9,6 +9,7 @@ module Pos.Script
        , txScriptCheck
 
        , parseValidator
+       , parseValidatorWithVersionOne
        , parseRedeemer
 
        , stdlib
@@ -74,6 +75,13 @@ parseValidator t = do
     return Script {
         scrScript = Bi.serialize' scr,
         scrVersion = 0 }
+
+-- | Parse a script intended to serve as a validator (or “lock”) in a
+-- transaction output with scrVersion 1
+parseValidatorWithVersionOne :: Bi Script_v0 => Text -> Either String Script
+parseValidatorWithVersionOne t = setVersionOne <$> parseValidator t
+    where
+        setVersionOne script = script { scrVersion = 1 }
 
 -- | Parse a script intended to serve as a redeemer (or “proof”) in a
 -- transaction input.

@@ -19,8 +19,8 @@ import           Test.Hspec.QuickCheck (prop)
 import           Test.QuickCheck (Property, arbitrary, counterexample, (==>))
 
 import           Pos.Arbitrary.Txp (BadSigsTx (..), DoubleInputTx (..), GoodTx (..))
-import           Pos.Core (HasConfiguration, addressHash, checkPubKeyAddress, makePubKeyAddressBoot,
-                           makeScriptAddress, mkCoin, sumCoins)
+import           Pos.Core (HasConfiguration, ScriptVersion, addressHash, checkPubKeyAddress,
+                           makePubKeyAddressBoot, makeScriptAddress, mkCoin, sumCoins)
 import           Pos.Core.Txp (Tx (..), TxAux (..), TxIn (..), TxInWitness (..), TxOut (..),
                                TxOutAux (..), TxSigData (..), TxWitness, isTxInUnknown)
 import           Pos.Crypto (SignTag (SignTx), checkSig, fakeSigner, hash, toPublic, unsafeHash,
@@ -29,7 +29,8 @@ import           Pos.Data.Attributes (mkAttributes)
 import           Pos.Script (PlutusError (..), Script)
 import           Pos.Script.Examples (alwaysSuccessValidator, badIntRedeemer, goodIntRedeemer,
                                       goodIntRedeemerWithBlah, goodStdlibRedeemer, idValidator,
-                                      intValidator, intValidatorWithBlah, multisigRedeemer,
+                                      intValidator, intValidatorWithBlah,
+                                      intValidatorWithVersionOne, multisigRedeemer,
                                       multisigValidator, shaStressRedeemer, sigStressRedeemer,
                                       stdlibValidator)
 import           Pos.Txp (MonadUtxoRead (utxoGet), ToilVerFailure (..), Utxo, VTxContext (..),
@@ -79,6 +80,9 @@ spec = withDefConfiguration $ describe "Txp.Toil.Utxo" $ do
 -- Properties
 ----------------------------------------------------------------------------
 
+adoptedScriptVersion :: ScriptVersion
+adoptedScriptVersion = 0
+
 findTxInUtxo :: HasConfiguration => TxIn -> TxOutAux -> Utxo -> Bool
 findTxInUtxo key txO utxo =
     let utxo' = M.delete key utxo
@@ -96,7 +100,7 @@ verifyTxInUtxo (SmallGenerator (GoodTx ls)) =
             let id = hash tx
             (idx, out) <- zip [0..] (toList _txOutputs)
             pure ((TxInUtxo id idx), TxOutAux out)
-        vtxContext = VTxContext False
+        vtxContext = VTxContext False adoptedScriptVersion
         txAux = TxAux newTx witness
     in counterexample ("\n"+|nameF "txs" (blockListF' "-" genericF txs)|+""
                            +|nameF "transaction" (B.build txAux)|+"") $
@@ -106,7 +110,7 @@ badSigsTx :: HasConfiguration => SmallGenerator BadSigsTx -> Property
 badSigsTx (SmallGenerator (getBadSigsTx -> ls)) =
     let (tx@UnsafeTx {..}, utxo, extendedInputs, txWits) =
             getTxFromGoodTx ls
-        ctx = VTxContext False
+        ctx = VTxContext False adoptedScriptVersion
         transactionVerRes =
             verifyTxUtxoPure ctx utxo $ TxAux tx txWits
         notAllSignaturesAreValid =
@@ -119,7 +123,7 @@ doubleInputTx :: HasConfiguration => SmallGenerator DoubleInputTx -> Property
 doubleInputTx (SmallGenerator (getDoubleInputTx -> ls)) =
     let ((tx@UnsafeTx {..}), utxo, _extendedInputs, txWits) =
             getTxFromGoodTx ls
-        ctx = VTxContext False
+        ctx = VTxContext False adoptedScriptVersion
         transactionVerRes =
             verifyTxUtxoPure ctx utxo $ TxAux tx txWits
         someInputsAreDuplicated =
@@ -129,7 +133,7 @@ doubleInputTx (SmallGenerator (getDoubleInputTx -> ls)) =
 validateGoodTx :: HasConfiguration => SmallGenerator GoodTx -> Property
 validateGoodTx (SmallGenerator (getGoodTx -> ls)) =
     let quadruple@(tx, utxo, _, txWits) = getTxFromGoodTx ls
-        ctx = VTxContext False
+        ctx = VTxContext False adoptedScriptVersion
         transactionVerRes =
             verifyTxUtxoPure ctx utxo $ TxAux tx txWits
         transactionReallyIsGood = individualTxPropertyVerifier quadruple
@@ -264,6 +268,13 @@ scriptTxSpec = describe "script transactions" $ do
             let witness = ScriptWitness intValidator goodIntRedeemer
             txShouldFailWithWitnessMismatch $ checkScriptTx
                 alwaysSuccessValidator
+                (const witness)
+
+        it "validator script provided in witness is greater \
+           \than adopted script version" $ do
+            let witness = ScriptWitness intValidatorWithVersionOne goodIntRedeemer
+            txShouldFailWithInvalidAdoptedScriptVer $ checkScriptTx
+                intValidatorWithVersionOne
                 (const witness)
 
         it "validator script isn't a proper validator, \
@@ -406,7 +417,7 @@ scriptTxSpec = describe "script transactions" $ do
         in  (TxInUtxo txid 0, outp, one ((TxInUtxo txid 0), (TxOutAux outp)))
 
     -- Do not verify versions
-    vtxContext = VTxContext False
+    vtxContext = VTxContext False adoptedScriptVersion
 
     -- Try to apply a transaction (with given utxo as context) and say
     -- whether it applied successfully
@@ -455,4 +466,20 @@ txShouldFailWithPlutus res err = case res of
               " but got: " <> show tiwReason
     other -> expectationFailure $
         "expected: Left ...: " <> show (WitnessScriptError err) <> "\n" <>
+        " but got: " <> show other
+
+-- | Transaction should fail with a 'ToilInvalidWitness' specifically 'WitnessAdoptedScriptVerMismatch' error.
+txShouldFailWithInvalidAdoptedScriptVer :: Either ToilVerFailure () -> Expectation
+txShouldFailWithInvalidAdoptedScriptVer = \case
+    Left (ToilInvalidWitness _ _ c) -> case c of
+        WitnessAdoptedScriptVerMismatch _ _ -> pass
+        WitnessScriptVerMismatch _ _ -> expectationFailure $
+            "expected: WitnessAdoptedScriptVerMismatch\n" <>
+            " but got: WitnessScriptVerMismatch"
+        other -> expectationFailure $
+            "expected: WitnessAdoptedScriptVerMismatch\n" <>
+            " but got: " <> show other
+
+    other -> expectationFailure $
+        "expected: Left ToilInvalidWitness\n" <>
         " but got: " <> show other
